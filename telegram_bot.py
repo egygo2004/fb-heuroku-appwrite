@@ -1,6 +1,7 @@
 """
 Telegram Bot for FB OTP Automation
 Runs fb_otp_browser.py directly on Heroku (no GitHub Actions)
+With dyno restart after each number for IP rotation
 """
 
 import os
@@ -9,12 +10,16 @@ import logging
 import subprocess
 import threading
 import tempfile
+import requests
+import json
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # Configuration
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '')
 ALLOWED_CHAT_ID = int(os.environ.get('CHAT_ID', '664193835'))
+HEROKU_API_KEY = os.environ.get('HEROKU_API_KEY', '')
+HEROKU_APP_NAME = os.environ.get('HEROKU_APP_NAME', 'fb-mob-bot')
 
 # Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -25,11 +30,81 @@ running_process = None
 process_lock = threading.Lock()
 
 
+def get_current_ip():
+    """Get current public IP address"""
+    try:
+        response = requests.get('https://api.ipify.org?format=json', timeout=5)
+        if response.status_code == 200:
+            return response.json().get('ip', 'Unknown')
+    except:
+        pass
+    try:
+        response = requests.get('https://ifconfig.me/ip', timeout=5)
+        if response.status_code == 200:
+            return response.text.strip()
+    except:
+        pass
+    return 'Unknown'
+
+
+def get_pending_numbers():
+    """Get pending numbers from Heroku config var"""
+    try:
+        pending = os.environ.get('PENDING_NUMBERS', '')
+        if pending:
+            return json.loads(pending)
+    except:
+        pass
+    return []
+
+
+def save_pending_numbers(numbers):
+    """Save pending numbers to Heroku config var"""
+    if not HEROKU_API_KEY:
+        logger.error("HEROKU_API_KEY not set")
+        return False
+    
+    try:
+        url = f"https://api.heroku.com/apps/{HEROKU_APP_NAME}/config-vars"
+        headers = {
+            "Authorization": f"Bearer {HEROKU_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.heroku+json; version=3"
+        }
+        data = {"PENDING_NUMBERS": json.dumps(numbers) if numbers else ""}
+        resp = requests.patch(url, headers=headers, json=data, timeout=10)
+        return resp.status_code == 200
+    except Exception as e:
+        logger.error(f"Error saving pending numbers: {e}")
+        return False
+
+
+def restart_dyno():
+    """Restart the Heroku dyno"""
+    if not HEROKU_API_KEY:
+        logger.error("HEROKU_API_KEY not set")
+        return False
+    
+    try:
+        url = f"https://api.heroku.com/apps/{HEROKU_APP_NAME}/dynos"
+        headers = {
+            "Authorization": f"Bearer {HEROKU_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.heroku+json; version=3"
+        }
+        resp = requests.delete(url, headers=headers, timeout=10)
+        return resp.status_code in [200, 202]
+    except Exception as e:
+        logger.error(f"Error restarting dyno: {e}")
+        return False
+
+
 def get_main_keyboard():
     """Return main menu keyboard"""
     keyboard = [
         [InlineKeyboardButton("🚀 بدء الفحص", callback_data="start_otp")],
         [InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_otp")],
+        [InlineKeyboardButton("🌐 عرض IP", callback_data="show_ip")],
         [InlineKeyboardButton("❓ المساعدة", callback_data="help")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -45,12 +120,130 @@ def get_confirm_keyboard():
 
 
 async def post_init(application):
-    """Set up bot commands menu"""
+    """Set up bot commands menu and check for pending numbers"""
     await application.bot.set_my_commands([
         BotCommand("start", "القائمة الرئيسية"),
         BotCommand("cancel", "إيقاف العملية الجارية"),
+        BotCommand("ip", "عرض الـ IP الحالي"),
         BotCommand("help", "المساعدة")
     ])
+    
+    # Check for pending numbers after restart
+    pending = get_pending_numbers()
+    if pending:
+        logger.info(f"Found {len(pending)} pending numbers after restart")
+        current_ip = get_current_ip()
+        
+        # Send notification
+        await application.bot.send_message(
+            chat_id=ALLOWED_CHAT_ID,
+            text=f"🔄 **تم إعادة التشغيل**\n\n"
+                 f"🌐 IP الحالي: `{current_ip}`\n"
+                 f"📱 الأرقام المتبقية: {len(pending)}\n\n"
+                 f"⏳ جاري استكمال الفحص...",
+            parse_mode='Markdown'
+        )
+        
+        # Process next number
+        asyncio.create_task(process_next_number(application.bot))
+
+
+async def process_next_number(bot):
+    """Process the next pending number"""
+    pending = get_pending_numbers()
+    
+    if not pending:
+        await bot.send_message(
+            chat_id=ALLOWED_CHAT_ID,
+            text="✅ **اكتملت جميع العمليات!**\n\nلا توجد أرقام متبقية.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Get next number
+    current_number = pending[0]
+    remaining = pending[1:]
+    
+    current_ip = get_current_ip()
+    
+    await bot.send_message(
+        chat_id=ALLOWED_CHAT_ID,
+        text=f"📱 **جاري فحص الرقم:**\n`{current_number}`\n\n"
+             f"🌐 IP: `{current_ip}`\n"
+             f"📊 المتبقي: {len(remaining)} رقم",
+        parse_mode='Markdown'
+    )
+    
+    # Save remaining numbers BEFORE processing (in case of crash)
+    save_pending_numbers(remaining)
+    
+    # Process this number
+    await run_single_number(bot, current_number)
+    
+    # If there are more numbers, restart dyno
+    if remaining:
+        await bot.send_message(
+            chat_id=ALLOWED_CHAT_ID,
+            text=f"🔄 جاري إعادة التشغيل للحصول على IP جديد...\n"
+                 f"📱 الأرقام المتبقية: {len(remaining)}",
+            parse_mode='Markdown'
+        )
+        restart_dyno()
+    else:
+        await bot.send_message(
+            chat_id=ALLOWED_CHAT_ID,
+            text="✅ **اكتملت جميع العمليات!**",
+            parse_mode='Markdown'
+        )
+
+
+async def run_single_number(bot, phone_number):
+    """Run OTP script for a single number"""
+    global running_process
+    
+    try:
+        # Save number to temp file
+        temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+        temp_file.write(phone_number)
+        temp_file.close()
+        
+        # Run the script
+        cmd = ['python', 'fb_otp_browser.py', temp_file.name, '--headless']
+        
+        with process_lock:
+            running_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+        
+        # Stream output
+        for line in running_process.stdout:
+            line = line.strip()
+            if line:
+                logger.info(f"[OTP] {line}")
+                
+                # Send important status updates (but not stats boxes)
+                is_stats_line = any(c in line for c in ['║', '╔', '╚', '╠', '═'])
+                is_important = any(kw in line.upper() for kw in ['OTP_SENT', 'NOT_FOUND', 'FAILED', 'ERROR', 'SUCCESS'])
+                
+                if is_important and not is_stats_line:
+                    await bot.send_message(chat_id=ALLOWED_CHAT_ID, text=f"📊 {line}")
+        
+        running_process.wait()
+        
+    except Exception as e:
+        logger.error(f"Error running OTP script: {e}")
+        await bot.send_message(chat_id=ALLOWED_CHAT_ID, text=f"❌ خطأ: {e}")
+    finally:
+        with process_lock:
+            running_process = None
+        try:
+            os.remove(temp_file.name)
+        except:
+            pass
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -59,21 +252,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ غير مصرح لك باستخدام هذا البوت")
         return
     
+    current_ip = get_current_ip()
+    
     reply_keyboard = [
         ["/start", "/cancel"],
-        ["/help"]
+        ["/ip", "/help"]
     ]
     markup = ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True, one_time_keyboard=False)
     
     await update.message.reply_text(
-        "🤖 **مرحباً بك في بوت FB OTP**\n\n"
-        "📱 لإرسال الأرقام:\n"
-        "• أرسل ملف .txt يحتوي على الأرقام\n"
-        "• أو اكتب الأرقام مباشرة (كل رقم في سطر)\n\n"
-        "⚡ السكريبت يعمل مباشرة على Heroku!",
+        f"🤖 **مرحباً بك في بوت FB OTP**\n\n"
+        f"🌐 IP الحالي: `{current_ip}`\n\n"
+        f"📱 لإرسال الأرقام:\n"
+        f"• أرسل ملف .txt يحتوي على الأرقام\n"
+        f"• أو اكتب الأرقام مباشرة (كل رقم في سطر)\n\n"
+        f"⚡ السكريبت يعيد التشغيل بعد كل رقم للحصول على IP جديد!",
         reply_markup=markup,
         parse_mode='Markdown'
     )
+
+
+async def ip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /ip command"""
+    if update.effective_chat.id != ALLOWED_CHAT_ID:
+        return
+    
+    current_ip = get_current_ip()
+    await update.message.reply_text(f"🌐 **IP الحالي:**\n`{current_ip}`", parse_mode='Markdown')
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,12 +294,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📋 **الأوامر:**
 /start - القائمة الرئيسية
-/cancel - إيقاف العملية الجارية
+/cancel - إيقاف العملية
+/ip - عرض IP الحالي
 /help - المساعدة
 
 ⚡ **طريقة العمل:**
-السكريبت يعمل مباشرة على Heroku باستخدام Chrome Headless
-النتائج تُرسل تلقائياً للمحادثة (صور + حالة)"""
+• رقم واحد يُفحص
+• ثم يتم إعادة تشغيل السيرفر
+• IP جديد → الرقم التالي"""
     
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
@@ -106,13 +313,16 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     global running_process
     
+    # Clear pending numbers
+    save_pending_numbers([])
+    
     with process_lock:
         if running_process and running_process.poll() is None:
             running_process.terminate()
             running_process = None
-            await update.message.reply_text("🛑 تم إيقاف العملية الجارية")
+            await update.message.reply_text("🛑 تم إيقاف العملية الجارية ومسح الأرقام المتبقية")
         else:
-            await update.message.reply_text("📭 لا توجد عمليات جارية")
+            await update.message.reply_text("✅ تم مسح الأرقام المتبقية")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -135,11 +345,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ الملف فارغ")
         return
     
-    # Store numbers in context
     context.user_data['pending_numbers'] = numbers
+    current_ip = get_current_ip()
     
     await update.message.reply_text(
         f"✅ تم استلام **{len(numbers)}** رقم\n\n"
+        f"🌐 IP الحالي: `{current_ip}`\n\n"
         f"🚀 اضغط 'بدء الفحص' للبدء:",
         reply_markup=get_confirm_keyboard(),
         parse_mode='Markdown'
@@ -159,80 +370,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not numbers:
         return
     
-    # Store numbers in context
     context.user_data['pending_numbers'] = numbers
+    current_ip = get_current_ip()
     
     await update.message.reply_text(
         f"✅ تم استلام **{len(numbers)}** رقم\n\n"
+        f"🌐 IP الحالي: `{current_ip}`\n\n"
         f"🚀 اضغط 'بدء الفحص' للبدء:",
         reply_markup=get_confirm_keyboard(),
         parse_mode='Markdown'
     )
-
-
-def run_otp_script_sync(numbers_file: str, bot, chat_id: int, loop):
-    """Run fb_otp_browser.py synchronously in a thread"""
-    global running_process
-    
-    try:
-        # Run the script with headless mode (sequential for Heroku stability)
-        cmd = ['python', 'fb_otp_browser.py', numbers_file, '--headless']
-        
-        with process_lock:
-            running_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
-        
-        # Stream output
-        output_lines = []
-        for line in running_process.stdout:
-            line = line.strip()
-            if line:
-                output_lines.append(line)
-                logger.info(f"[OTP] {line}")
-                
-                # Send important status updates to Telegram (but not statistics boxes)
-                # Skip lines with box characters or repeated stats
-                is_stats_line = any(c in line for c in ['║', '╔', '╚', '╠', '═'])
-                is_important = any(kw in line.upper() for kw in ['OTP_SENT', 'NOT_FOUND', 'FAILED', 'ERROR', 'SUCCESS'])
-                
-                if is_important and not is_stats_line:
-                    asyncio.run_coroutine_threadsafe(
-                        bot.send_message(chat_id=chat_id, text=f"📊 {line}"),
-                        loop
-                    )
-        
-        running_process.wait()
-        
-        # Send completion message
-        asyncio.run_coroutine_threadsafe(
-            bot.send_message(
-                chat_id=chat_id,
-                text="✅ **اكتملت العملية!**\n\nتم فحص جميع الأرقام.",
-                parse_mode='Markdown'
-            ),
-            loop
-        )
-        
-    except Exception as e:
-        logger.error(f"Error running OTP script: {e}")
-        asyncio.run_coroutine_threadsafe(
-            bot.send_message(chat_id=chat_id, text=f"❌ خطأ: {e}"),
-            loop
-        )
-    finally:
-        with process_lock:
-            running_process = None
-        
-        # Cleanup temp file
-        try:
-            os.remove(numbers_file)
-        except:
-            pass
 
 
 async def start_otp_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,39 +393,30 @@ async def start_otp_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    global running_process
-    with process_lock:
-        if running_process and running_process.poll() is None:
-            await query.edit_message_text(
-                "⚠️ هناك عملية جارية بالفعل!\n"
-                "استخدم /cancel لإيقافها أولاً.",
-                reply_markup=get_main_keyboard()
-            )
-            return
-    
     numbers = context.user_data.pop('pending_numbers')
     
-    # Save numbers to temp file
-    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
-    temp_file.write('\n'.join(numbers))
-    temp_file.close()
+    # Save all numbers to Heroku config
+    if not save_pending_numbers(numbers):
+        await query.edit_message_text(
+            "❌ **خطأ:** لم يتم حفظ الأرقام.\n"
+            "تأكد من إعداد HEROKU_API_KEY",
+            parse_mode='Markdown',
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    current_ip = get_current_ip()
     
     await query.edit_message_text(
         f"🚀 **جاري بدء الفحص...**\n\n"
         f"📱 الأرقام: {len(numbers)}\n"
-        f"⚡ الوضع: Headless + Parallel\n\n"
-        f"📊 النتائج ستظهر هنا تلقائياً...",
+        f"🌐 IP الحالي: `{current_ip}`\n\n"
+        f"⚡ سيتم إعادة التشغيل بعد كل رقم",
         parse_mode='Markdown'
     )
     
-    # Start in background thread
-    loop = asyncio.get_event_loop()
-    thread = threading.Thread(
-        target=run_otp_script_sync,
-        args=(temp_file.name, context.bot, query.message.chat_id, loop)
-    )
-    thread.daemon = True
-    thread.start()
+    # Process first number
+    await process_next_number(context.bot)
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -292,13 +430,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_otp_process(update, context)
     elif data == "cancel_otp":
         global running_process
+        save_pending_numbers([])
         with process_lock:
             if running_process and running_process.poll() is None:
                 running_process.terminate()
                 running_process = None
-                await query.edit_message_text("🛑 تم إيقاف العملية", reply_markup=get_main_keyboard())
-            else:
-                await query.edit_message_text("📭 لا توجد عمليات جارية", reply_markup=get_main_keyboard())
+        await query.edit_message_text("🛑 تم إيقاف العملية ومسح الأرقام", reply_markup=get_main_keyboard())
+    elif data == "show_ip":
+        current_ip = get_current_ip()
+        await query.edit_message_text(f"🌐 **IP الحالي:**\n`{current_ip}`", parse_mode='Markdown', reply_markup=get_main_keyboard())
     elif data == "cancel_selection":
         if 'pending_numbers' in context.user_data:
             del context.user_data['pending_numbers']
@@ -306,11 +446,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "help":
         help_text = """❓ **المساعدة**
 
-📱 **لإرسال الأرقام:**
-• أرسل ملف .txt يحتوي على الأرقام
-• أو اكتب الأرقام مباشرة
+📱 لإرسال الأرقام: أرسل ملف .txt أو اكتب مباشرة
 
-⚡ السكريبت يعمل مباشرة على Heroku!"""
+⚡ السيرفر يعيد التشغيل بعد كل رقم للحصول على IP جديد"""
         await query.edit_message_text(help_text, reply_markup=get_main_keyboard(), parse_mode='Markdown')
 
 
@@ -329,6 +467,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("ip", ip_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
