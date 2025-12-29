@@ -11,7 +11,9 @@ API_KEY = "standard_6525e0e8ab94269048e675e72adcef41c16cea7055fcfe72f4a8cc58a5a5
 DATABASE_ID = "6952e5fa00389b56379c"
 COLLECTION_NUMBERS = "numbers"
 
-def add_number(phone):
+from appwrite.query import Query
+
+def list_pending():
     client = Client()
     client.set_endpoint(ENDPOINT)
     client.set_project(PROJECT_ID)
@@ -20,21 +22,18 @@ def add_number(phone):
     db = Databases(client)
     
     try:
-        # Check if exists first? Appwrite creates unique ID so duplicates allowed unless we check.
-        # But for test, just add.
-        result = db.create_document(
+        result = db.list_documents(
             DATABASE_ID,
             COLLECTION_NUMBERS,
-            ID.unique(),
-            {
-                'phone': phone,
-                'status': 'pending'
-            }
+            queries=[
+                Query.equal('status', 'pending')
+            ]
         )
-        print(f"Successfully added number: {phone}")
-        print(f"ID: {result['$id']}")
+        print(f"Found {result['total']} pending numbers:")
+        for doc in result['documents']:
+            print(f"- {doc['phone']} (ID: {doc['$id']})")
     except Exception as e:
-        print(f"Error adding number: {e}")
+        print(f"Error listing numbers: {e}")
 
 if __name__ == "__main__":
-    add_number("959750790188")
+    list_pending()

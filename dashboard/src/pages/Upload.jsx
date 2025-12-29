@@ -26,8 +26,7 @@ const Upload = () => {
                     ID.unique(),
                     {
                         phone: phone,
-                        status: 'pending',
-                        created_at: new Date().toISOString()
+                        status: 'pending'
                     }
                 ).then(() => count++).catch(() => errors++)
             );
@@ -73,8 +72,8 @@ const Upload = () => {
                             onClick={handleUpload}
                             disabled={loading || !text.trim()}
                             className={`px-6 py-2 rounded-lg font-medium flex items-center space-x-2 transition ${loading || !text.trim()
-                                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
-                                    : 'bg-blue-600 hover:bg-blue-500 text-white'
+                                ? 'bg-gray-800 text-gray-500 cursor-not-allowed'
+                                : 'bg-blue-600 hover:bg-blue-500 text-white'
                                 }`}
                         >
                             {loading && <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />}
