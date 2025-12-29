@@ -198,7 +198,7 @@ async def process_next_number(bot):
 
 
 async def run_single_number(bot, phone_number):
-    """Run OTP script for a single number"""
+    """Run OTP script for a single number using asyncio subprocess"""
     global running_process
     
     try:
@@ -207,21 +207,25 @@ async def run_single_number(bot, phone_number):
         temp_file.write(phone_number)
         temp_file.close()
         
-        # Run the script
+        # Run the script using asyncio subprocess
         cmd = ['python', 'fb_otp_browser.py', temp_file.name, '--headless']
         
-        with process_lock:
-            running_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
+        )
         
-        # Stream output
-        for line in running_process.stdout:
-            line = line.strip()
+        with process_lock:
+            running_process = process
+        
+        # Read output line by line
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+            
+            line = line.decode('utf-8', errors='ignore').strip()
             if line:
                 logger.info(f"[OTP] {line}")
                 
@@ -230,13 +234,21 @@ async def run_single_number(bot, phone_number):
                 is_important = any(kw in line.upper() for kw in ['OTP_SENT', 'NOT_FOUND', 'FAILED', 'ERROR', 'SUCCESS'])
                 
                 if is_important and not is_stats_line:
-                    await bot.send_message(chat_id=ALLOWED_CHAT_ID, text=f"📊 {line}")
+                    try:
+                        await bot.send_message(chat_id=ALLOWED_CHAT_ID, text=f"📊 {line}")
+                    except Exception as e:
+                        logger.error(f"Error sending status: {e}")
         
-        running_process.wait()
+        # Wait for process to complete
+        await process.wait()
+        logger.info(f"Process completed with exit code: {process.returncode}")
         
     except Exception as e:
         logger.error(f"Error running OTP script: {e}")
-        await bot.send_message(chat_id=ALLOWED_CHAT_ID, text=f"❌ خطأ: {e}")
+        try:
+            await bot.send_message(chat_id=ALLOWED_CHAT_ID, text=f"❌ خطأ: {e}")
+        except:
+            pass
     finally:
         with process_lock:
             running_process = None
@@ -411,12 +423,13 @@ async def start_otp_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚀 **جاري بدء الفحص...**\n\n"
         f"📱 الأرقام: {len(numbers)}\n"
         f"🌐 IP الحالي: `{current_ip}`\n\n"
-        f"⚡ سيتم إعادة التشغيل بعد كل رقم",
+        f"🔄 سيتم إعادة التشغيل لبدء المعالجة...",
         parse_mode='Markdown'
     )
     
-    # Process first number
-    await process_next_number(context.bot)
+    # Restart dyno - the new process will pick up the numbers from config vars
+    restart_dyno()
+
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
