@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { client, databases, CONFIG } from '../lib/appwrite';
+import { client, databases, storage, CONFIG } from '../lib/appwrite';
 import { Query } from 'appwrite';
-import { Activity, CheckCircle, Clock, AlertTriangle, Search, ExternalLink } from 'lucide-react';
+import { Activity, CheckCircle, Clock, AlertTriangle, ExternalLink, Image, ChevronDown, ChevronUp } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 const Dashboard = () => {
@@ -11,12 +11,12 @@ const Dashboard = () => {
         completed: 0,
         failed: 0
     });
-    const [activeWorkers, setActiveWorkers] = useState([]);
-    const [recentLogs, setRecentLogs] = useState([]);
+    const [allNumbers, setAllNumbers] = useState([]);
+    const [expandedRow, setExpandedRow] = useState(null);
+    const [numberLogs, setNumberLogs] = useState({});
 
     const fetchStats = async () => {
         try {
-            // Using listDocuments total count for stats is efficient enough for small scale
             const [pending, processing, completed, failed] = await Promise.all([
                 databases.listDocuments(CONFIG.DATABASE_ID, CONFIG.COLLECTION_NUMBERS, [Query.equal('status', 'pending'), Query.limit(1)]),
                 databases.listDocuments(CONFIG.DATABASE_ID, CONFIG.COLLECTION_NUMBERS, [Query.equal('status', 'processing'), Query.limit(100)]),
@@ -30,40 +30,72 @@ const Dashboard = () => {
                 completed: completed.total,
                 failed: failed.total
             });
-            setActiveWorkers(processing.documents);
-
         } catch (error) {
             console.error(error);
         }
     };
 
-    const fetchRecentLogs = async () => {
+    const fetchAllNumbers = async () => {
+        try {
+            const result = await databases.listDocuments(
+                CONFIG.DATABASE_ID,
+                CONFIG.COLLECTION_NUMBERS,
+                [Query.orderDesc('$createdAt'), Query.limit(50)]
+            );
+            setAllNumbers(result.documents);
+        } catch (e) { console.error(e); }
+    };
+
+    const fetchLogsForNumber = async (numberId) => {
+        if (numberLogs[numberId]) return; // Already fetched
         try {
             const logs = await databases.listDocuments(
                 CONFIG.DATABASE_ID,
                 CONFIG.COLLECTION_LOGS,
-                [Query.orderDesc('timestamp'), Query.limit(10)]
+                [Query.equal('number_id', numberId), Query.orderAsc('$createdAt'), Query.limit(100)]
             );
-            setRecentLogs(logs.documents);
+            setNumberLogs(prev => ({ ...prev, [numberId]: logs.documents }));
         } catch (e) { console.error(e); }
+    };
+
+    const toggleRow = (numberId) => {
+        if (expandedRow === numberId) {
+            setExpandedRow(null);
+        } else {
+            setExpandedRow(numberId);
+            fetchLogsForNumber(numberId);
+        }
+    };
+
+    const getScreenshotUrl = (fileId) => {
+        return storage.getFileView(CONFIG.BUCKET_ID, fileId);
     };
 
     useEffect(() => {
         fetchStats();
-        fetchRecentLogs();
+        fetchAllNumbers();
 
-        // Subscribe to numbers collection for live stats
         const unsubNumbers = client.subscribe(
             `databases.${CONFIG.DATABASE_ID}.collections.${CONFIG.COLLECTION_NUMBERS}.documents`,
-            () => fetchStats()
+            () => {
+                fetchStats();
+                fetchAllNumbers();
+            }
         );
 
-        // Subscribe to logs for live ticker
         const unsubLogs = client.subscribe(
             `databases.${CONFIG.DATABASE_ID}.collections.${CONFIG.COLLECTION_LOGS}.documents`,
             (response) => {
                 if (response.events.includes('databases.*.collections.*.documents.*.create')) {
-                    setRecentLogs(prev => [response.payload, ...prev].slice(0, 10));
+                    const log = response.payload;
+                    if (log.number_id) {
+                        setNumberLogs(prev => {
+                            if (prev[log.number_id]) {
+                                return { ...prev, [log.number_id]: [...prev[log.number_id], log] };
+                            }
+                            return prev;
+                        });
+                    }
                 }
             }
         );
@@ -74,6 +106,20 @@ const Dashboard = () => {
         };
     }, []);
 
+    const getStatusBadge = (status) => {
+        const styles = {
+            pending: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+            processing: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
+            completed: 'bg-green-500/20 text-green-400 border-green-500/30',
+            failed: 'bg-red-500/20 text-red-400 border-red-500/30'
+        };
+        return (
+            <span className={`px-2 py-1 text-xs font-medium rounded border ${styles[status] || styles.pending}`}>
+                {status?.toUpperCase()}
+            </span>
+        );
+    };
+
     return (
         <div className="p-6 max-w-7xl mx-auto space-y-6">
             <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
@@ -81,65 +127,84 @@ const Dashboard = () => {
             </h1>
 
             {/* Stats Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <Card icon={<Clock size={24} />} color="blue" label="Pending" value={stats.pending} />
                 <Card icon={<Activity size={24} />} color="yellow" label="Processing" value={stats.processing} />
                 <Card icon={<CheckCircle size={24} />} color="green" label="Completed" value={stats.completed} />
                 <Card icon={<AlertTriangle size={24} />} color="red" label="Failed" value={stats.failed} />
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                {/* Active Workers */}
-                <div className="lg:col-span-2 bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col h-[500px]">
-                    <div className="p-4 border-b border-gray-800 flex justify-between items-center bg-gray-900/50 backdrop-blur">
-                        <h2 className="text-xl font-semibold flex items-center gap-2">
-                            <Activity size={20} className="text-green-500" />
-                            Active Workers ({activeWorkers.length})
-                        </h2>
-                    </div>
-                    <div className="overflow-y-auto flex-1 p-2 space-y-2">
-                        {activeWorkers.length === 0 ? (
-                            <div className="flex flex-col items-center justify-center h-full text-gray-500">
-                                <Clock size={48} className="mb-4 opacity-50" />
-                                <p>No active processing tasks.</p>
-                            </div>
-                        ) : (
-                            activeWorkers.map(doc => (
-                                <div key={doc.$id} className="p-4 bg-gray-950 border border-gray-800 rounded-lg hover:border-blue-500/50 transition flex justify-between items-center">
-                                    <div className="flex items-center space-x-4">
-                                        <div className="relative">
-                                            <div className="w-3 h-3 bg-green-500 rounded-full animate-ping absolute inset-0 opacity-75"></div>
-                                            <div className="w-3 h-3 bg-green-500 rounded-full relative"></div>
-                                        </div>
-                                        <div>
-                                            <p className="font-mono font-bold text-lg">{doc.phone}</p>
-                                            <p className="text-xs text-gray-500 font-mono">Worker: {doc.worker_id || 'Unknown'}</p>
-                                        </div>
-                                    </div>
-                                    <Link to={`/logs?q=${doc.phone}`} className="p-2 hover:bg-gray-800 rounded-full text-blue-400 transition">
-                                        <ExternalLink size={20} />
-                                    </Link>
-                                </div>
-                            ))
-                        )}
-                    </div>
+            {/* Numbers Table */}
+            <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                <div className="p-4 border-b border-gray-800 bg-gray-900/50">
+                    <h2 className="text-xl font-semibold">All Numbers</h2>
                 </div>
-
-                {/* Recent Logs Ticker */}
-                <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden flex flex-col h-[500px]">
-                    <div className="p-4 border-b border-gray-800 bg-gray-900/50 backdrop-blur">
-                        <h2 className="text-xl font-semibold">Live Logs</h2>
-                    </div>
-                    <div className="overflow-y-auto flex-1 p-2 font-mono text-xs space-y-1">
-                        {recentLogs.map((log) => (
-                            <div key={log.$id} className={`p-2 rounded border border-gray-800/50 ${getLogColor(log.level)}`}>
-                                <div className="flex justify-between opacity-50 mb-1">
-                                    <span>{new Date(log.timestamp).toLocaleTimeString()}</span>
-                                </div>
-                                <p className="break-words">{log.message}</p>
-                            </div>
-                        ))}
-                    </div>
+                <div className="overflow-x-auto">
+                    <table className="w-full">
+                        <thead className="bg-gray-950 text-left text-sm text-gray-400">
+                            <tr>
+                                <th className="p-3">Phone</th>
+                                <th className="p-3">Status</th>
+                                <th className="p-3">Steps</th>
+                                <th className="p-3">Result</th>
+                                <th className="p-3"></th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-800">
+                            {allNumbers.map((num) => (
+                                <React.Fragment key={num.$id}>
+                                    <tr className="hover:bg-gray-800/50 cursor-pointer" onClick={() => toggleRow(num.$id)}>
+                                        <td className="p-3 font-mono font-bold">{num.phone}</td>
+                                        <td className="p-3">{getStatusBadge(num.status)}</td>
+                                        <td className="p-3 text-sm text-gray-400">
+                                            {numberLogs[num.$id]?.length || 0} steps
+                                        </td>
+                                        <td className="p-3 text-sm text-gray-400 max-w-[200px] truncate">
+                                            {num.result || '-'}
+                                        </td>
+                                        <td className="p-3 text-gray-500">
+                                            {expandedRow === num.$id ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                                        </td>
+                                    </tr>
+                                    {expandedRow === num.$id && (
+                                        <tr>
+                                            <td colSpan="5" className="p-0 bg-gray-950">
+                                                <div className="p-4 space-y-3 max-h-[400px] overflow-y-auto">
+                                                    {numberLogs[num.$id]?.length === 0 && (
+                                                        <p className="text-gray-500 text-sm">No logs yet...</p>
+                                                    )}
+                                                    {numberLogs[num.$id]?.map((log, idx) => (
+                                                        <div key={log.$id} className="flex gap-4 items-start border-l-2 border-gray-700 pl-4">
+                                                            <div className="flex-1">
+                                                                <div className="flex items-center gap-2 mb-1">
+                                                                    <span className="text-xs text-gray-500">{idx + 1}.</span>
+                                                                    <span className={`text-sm ${log.level === 'error' ? 'text-red-400' :
+                                                                            log.level === 'success' ? 'text-green-400' : 'text-gray-300'
+                                                                        }`}>
+                                                                        {log.message}
+                                                                    </span>
+                                                                </div>
+                                                                {log.screenshot_id && (
+                                                                    <a
+                                                                        href={getScreenshotUrl(log.screenshot_id)}
+                                                                        target="_blank"
+                                                                        rel="noopener noreferrer"
+                                                                        className="inline-flex items-center gap-1 mt-1 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-blue-400 hover:bg-gray-700"
+                                                                    >
+                                                                        <Image size={12} /> Screenshot
+                                                                    </a>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    )}
+                                </React.Fragment>
+                            ))}
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
@@ -163,15 +228,6 @@ const Card = ({ icon, color, label, value }) => {
             </div>
         </div>
     );
-}
-
-const getLogColor = (level) => {
-    switch (level?.toLowerCase()) {
-        case 'error': return 'bg-red-950/30 text-red-200 border-red-900/50';
-        case 'warning': return 'bg-yellow-950/30 text-yellow-200 border-yellow-900/50';
-        case 'success': return 'bg-green-950/30 text-green-200 border-green-900/50';
-        default: return 'bg-gray-950 text-gray-400';
-    }
-}
+};
 
 export default Dashboard;
