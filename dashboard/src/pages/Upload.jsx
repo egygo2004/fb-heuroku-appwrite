@@ -39,7 +39,8 @@ const Upload = () => {
             });
             setText('');
         } catch (e) {
-            setStatus({ type: 'error', msg: `Upload failed: ${e.message}` });
+            console.error(e);
+            setStatus({ type: 'error', msg: `Upload failed: ${e.message} (Code: ${e.code})` });
         } finally {
             setLoading(false);
         }
