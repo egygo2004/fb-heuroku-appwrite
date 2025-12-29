@@ -1193,6 +1193,55 @@ chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}
                 # Check if SMS is available
                 sms_available = "sms" in page_source or "text message" in page_source
                 if not sms_available:
+                    log("NO SMS visible yet...", "WARN")
+                    
+                    # USER REQUESTED FIX: Click WhatsApp -> Wait 2s -> SMS might appear
+                    try:
+                        # Find WhatsApp option
+                        whatsapp_elem = self.driver.find_element(By.XPATH, "//*[contains(text(), 'WhatsApp') or contains(text(), 'واتساب')]")
+                        if whatsapp_elem:
+                            log("Clicking WhatsApp option to trigger refresh (User Logic)...", "INFO")
+                            try:
+                                whatsapp_elem.click()
+                            except:
+                                # Try clicking the radio if the text click fails
+                                try:
+                                    # Find nearby radio?
+                                    self.driver.execute_script("arguments[0].click();", whatsapp_elem)
+                                except: pass
+                            
+                            time.sleep(2)
+                            
+                            # RE-CHECK FOR SMS
+                            log("Re-checking for SMS option after WhatsApp toggle...", "INFO")
+                            
+                            # Re-run scanning logic simple version
+                            # 1. Check for SMS keyword
+                            try:
+                                sms_new = self.driver.find_element(By.XPATH, "//*[contains(translate(text(), 'SMS', 'sms'), 'sms') or contains(text(), 'text message')]")
+                                if sms_new:
+                                    sms_new.click()
+                                    log("Found SMS option after refresh!", "SUCCESS")
+                                    return True, "SMS_FOUND_AFTER_WHATSAPP_TOGGLE"
+                            except:
+                                pass
+                            
+                            # 2. Check for Phone Number pattern
+                            if phone:
+                                try:
+                                     # Look for elements containing last digits of phone
+                                     last_digits = phone[-2:]
+                                     phones_new = self.driver.find_elements(By.XPATH, f"//*[contains(text(), '{last_digits}')]")
+                                     for p in phones_new:
+                                         if "whatsapp" not in p.text.lower() and "@" not in p.text:
+                                             p.click()
+                                             log("Found Phone option after refresh!", "SUCCESS")
+                                             return True, "PHONE_FOUND_AFTER_WHATSAPP_TOGGLE"
+                                except: pass
+                                
+                    except Exception as e:
+                        log(f"WhatsApp toggle failed: {e}", "WARN")
+
                     log("NO SMS OPTION AVAILABLE - Only email/notification/password options found", "ERROR")
                     return False, "NO_SMS_OPTION_VISIBLE"
             
