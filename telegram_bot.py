@@ -195,8 +195,12 @@ def run_otp_script_sync(numbers_file: str, bot, chat_id: int, loop):
                 output_lines.append(line)
                 logger.info(f"[OTP] {line}")
                 
-                # Send important status updates to Telegram
-                if any(kw in line.upper() for kw in ['SUCCESS', 'OTP_SENT', 'NOT_FOUND', 'FAILED', 'ERROR']):
+                # Send important status updates to Telegram (but not statistics boxes)
+                # Skip lines with box characters or repeated stats
+                is_stats_line = any(c in line for c in ['║', '╔', '╚', '╠', '═'])
+                is_important = any(kw in line.upper() for kw in ['OTP_SENT', 'NOT_FOUND', 'FAILED', 'ERROR', 'SUCCESS'])
+                
+                if is_important and not is_stats_line:
                     asyncio.run_coroutine_threadsafe(
                         bot.send_message(chat_id=chat_id, text=f"📊 {line}"),
                         loop
