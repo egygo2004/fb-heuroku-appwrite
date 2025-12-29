@@ -1272,10 +1272,10 @@ chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}
 
             # SUCCESS CHECK FIRST: Robust Element Detection
             try:
-                # 1. Check for Header "Confirm your account"
-                confirm_headers = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Confirm your account')]")
+                # 1. Check for Header "Confirm your account" OR "Confirm your profile"
+                confirm_headers = self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Confirm your account') or contains(text(), 'Confirm your profile')]")
                 if confirm_headers:
-                     log("*** OTP CODE SENT! (Found 'Confirm your account' header) ***", "SUCCESS")
+                     log("*** OTP CODE SENT! (Found 'Confirm your account/profile' header) ***", "SUCCESS")
                      return True, "OTP_SENT_HEADER_FOUND"
 
                 # 2. Check for "Enter code" input field (by placeholder or structure)
@@ -1295,6 +1295,7 @@ chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}
             found_captcha = False
             for kw in captcha_keywords:
                 if kw in page_source:
+                    # Double check: ignore if we see success text near it?
                     found_captcha = True
                     break
             
@@ -1320,6 +1321,7 @@ chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}
                 "أدخل الرمز",
                 "تم الإرسال",
                 "confirm your account",
+                "confirm your profile",
             ]
             
             for indicator in success_indicators:
