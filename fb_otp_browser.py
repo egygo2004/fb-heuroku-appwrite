@@ -303,7 +303,37 @@ class FacebookOTPBrowser:
             # Standard Chrome Options
             safe_options = get_configured_options(use_mobile_emulation=True)
             
-            if ChromeDriverManager:
+            # Check for Heroku chrome-for-testing buildpack first
+            heroku_chrome = None
+            heroku_chromedriver = None
+            
+            # Find Chrome for Testing in Heroku
+            import glob
+            chrome_paths = glob.glob('/app/.chrome-for-testing/chrome-linux64/chrome') + \
+                          glob.glob('.chrome-for-testing/chrome-linux64/chrome')
+            chromedriver_paths = glob.glob('/app/.chrome-for-testing/chromedriver-linux64/chromedriver') + \
+                                glob.glob('.chrome-for-testing/chromedriver-linux64/chromedriver')
+            
+            if chrome_paths:
+                heroku_chrome = chrome_paths[0]
+                log(f"Found Heroku Chrome: {heroku_chrome}", "OK")
+            if chromedriver_paths:
+                heroku_chromedriver = chromedriver_paths[0]
+                log(f"Found Heroku ChromeDriver: {heroku_chromedriver}", "OK")
+            
+            # Method 1: Use Heroku chrome-for-testing buildpack
+            if heroku_chrome and heroku_chromedriver:
+                try:
+                    safe_options.binary_location = heroku_chrome
+                    service = Service(heroku_chromedriver)
+                    self.driver = webdriver.Chrome(service=service, options=safe_options)
+                    log("Chrome (Heroku Buildpack) ready!", "OK")
+                except Exception as e:
+                    log(f"Heroku Chrome failed: {e}", "WARN")
+                    self.driver = None
+            
+            # Method 2: Try ChromeDriverManager (for local development)
+            if not self.driver and ChromeDriverManager:
                 try:
                     driver_path = ChromeDriverManager().install()
                     if "THIRD_PARTY_NOTICES" in driver_path:
@@ -320,7 +350,7 @@ class FacebookOTPBrowser:
                 except Exception as e:
                         log(f"Standard Chrome (Manager) failed: {e}", "WARN")
             
-            # Fallback: Direct Standard Chrome
+            # Method 3: Fallback - Direct Standard Chrome
             if not self.driver:
                 try:
                     self.driver = webdriver.Chrome(options=safe_options)

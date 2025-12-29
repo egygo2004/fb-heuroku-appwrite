@@ -175,8 +175,8 @@ def run_otp_script_sync(numbers_file: str, bot, chat_id: int, loop):
     global running_process
     
     try:
-        # Run the script with headless mode
-        cmd = ['python', 'fb_otp_browser.py', numbers_file, '--headless', '--parallel']
+        # Run the script with headless mode (sequential for Heroku stability)
+        cmd = ['python', 'fb_otp_browser.py', numbers_file, '--headless']
         
         with process_lock:
             running_process = subprocess.Popen(

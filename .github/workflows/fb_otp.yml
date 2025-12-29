@@ -1,0 +1,209 @@
+name: FB OTP Automation
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      numbers:
+        description: Phone numbers one per line
+        required: false
+        type: string
+      mode:
+        description: 'Mode: run or ping'
+        required: false
+        default: 'run'
+        type: string
+
+
+
+jobs:
+  ping-check:
+    if: ${{ github.event.inputs.mode == 'ping' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Ping
+        run: |
+           curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" --data-urlencode "text=✅ Server (${{ github.repository }}) is Online and Working!"
+
+  prepare-matrix:
+    if: ${{ github.event.inputs.mode == 'run' || github.event.inputs.mode == '' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Generate Matrix
+        id: set-matrix
+        run: |
+          # Get input numbers, remove empty lines
+          INPUT_NUMBERS="${{ github.event.inputs.numbers }}"
+          
+          # Create JSON array of chunks (batches of 5)
+          # We use python for easier JSON handling
+          MATRIX_JSON=$(python3 -c "
+          import json
+          import sys
+          
+          input_str = '''$INPUT_NUMBERS'''
+          numbers = [n.strip() for n in input_str.split('\n') if n.strip()]
+          
+          # Chunk size = 1 (One number per job as requested)
+          chunk_size = 1
+          chunks = [numbers[i:i + chunk_size] for i in range(0, len(numbers), chunk_size)]
+          
+          # Create list of objects for matrix, e.g. [{'chunk': 'num1'}]
+          matrix = [{'numbers': '\\n'.join(chunk), 'id': i+1} for i, chunk in enumerate(chunks)]
+          
+          # SAFETY: If matrix is empty (no numbers), add a dummy entry to prevent workflow error
+          if not matrix:
+             matrix = [{'numbers': '', 'id': '0'}]
+             
+          print(json.dumps(matrix))
+          ")
+          
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          echo "Generated Matrix: $MATRIX_JSON"
+
+  process-numbers:
+    needs: prepare-matrix
+    if: ${{ github.event.inputs.mode == 'run' || github.event.inputs.mode == '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@latest
+      
+      - name: WARP
+        uses: fscarmen/warp-on-actions@v1.2
+        with:
+          stack: dual
+      
+      - name: Install dependencies
+        run: pip install selenium webdriver-manager requests selenium-wire
+      
+      - name: Get IP and WARP Status
+        id: ip
+        run: |
+           echo "ip=$(curl -s ifconfig.me)" >> $GITHUB_OUTPUT
+           TRACE=$(curl -s https://www.cloudflare.com/cdn-cgi/trace)
+           if echo "$TRACE" | grep -q "warp=on"; then
+             echo "warp_status=✅ Active" >> $GITHUB_OUTPUT
+           else
+             echo "warp_status=❌ Inactive" >> $GITHUB_OUTPUT
+           fi
+      
+      - name: Create batch file
+        run: |
+          echo "${{ matrix.numbers }}" > numbers.txt
+          echo "Processing Batch #${{ matrix.id }}"
+          cat numbers.txt
+
+          
+      - name: Send Start Message
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BATCH_ID: ${{ matrix.id }}
+          IP: ${{ steps.ip.outputs.ip }}
+          WARP_STATUS: ${{ steps.ip.outputs.warp_status }}
+        run: |
+          python3 -c "
+          import os, requests
+          try:
+              token = os.environ['TELEGRAM_TOKEN']
+              chat_id = os.environ['TELEGRAM_CHAT_ID']
+              batch_id = os.environ['BATCH_ID']
+              ip = os.environ.get('IP', 'Unknown')
+              warp = os.environ.get('WARP_STATUS', 'Unknown')
+              
+              with open('numbers.txt', 'r') as f:
+                  count = len([l for l in f if l.strip()])
+              
+              msg = f'🚀 Batch #{batch_id} Started ({count} numbers)\n🌍 IP: {ip}\n🛡️ WARP: {warp}'
+              requests.post(f'https://api.telegram.org/bot{token}/sendMessage', data={'chat_id': chat_id, 'text': msg})
+              print('Start message sent successfully')
+          except Exception as e:
+              print(f'Failed to send message: {e}')
+          "
+      
+      - name: Run OTP Script (Batch)
+        id: otp
+        continue-on-error: true
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          IP="${{ steps.ip.outputs.ip }}"
+          while IFS= read -r number || [ -n "$number" ]; do
+            [ -z "$number" ] && continue
+            echo "Processing: $number"
+            result=$(python fb_otp_browser.py "$number" --headless 2>&1 || true)
+            echo "$result"
+            
+            # Status Check with Reason Extraction
+            if echo "$result" | grep -qi "OTP_SENT"; then
+              status="✅ OTP Sent"
+            else
+              # Try to get specific failure reason
+              fail_reason=$(echo "$result" | grep "FINAL_STATUS_MSG:" | tail -1 | sed 's/FINAL_STATUS_MSG: //')
+              if [ -n "$fail_reason" ] && [ "$fail_reason" != "Unknown Error" ]; then
+                status="❌ $fail_reason"
+              elif echo "$result" | grep -qi "FAILED"; then
+                status="❌ Failed (Generic)"
+              else
+                status="⚠️ Check Logs"
+              fi
+            fi
+            
+            # Extract URL
+            last_url=$(echo "$result" | grep -E "Final URL:|Last URL:" | tail -1 | sed 's/.*URL: //' || echo "")
+            
+            if [ -n "$last_url" ]; then
+              msg="Batch #${{ matrix.id }} | $number - $status | URL: $last_url"
+            else
+              msg="Batch #${{ matrix.id }} | $number - $status | IP: $IP"
+            fi
+            
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage" -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" --data-urlencode "text=$msg"
+            sleep 1
+          done < numbers.txt
+      
+      - name: Send Completion Message
+        if: always()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BATCH_ID: ${{ matrix.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 -c "
+          import os, requests
+          try:
+              token = os.environ['TELEGRAM_TOKEN']
+              chat_id = os.environ['TELEGRAM_CHAT_ID']
+              batch_id = os.environ['BATCH_ID']
+              repo_name = os.environ['REPO']
+              
+              with open('numbers.txt', 'r') as f:
+                  count = len([l for l in f if l.strip()])
+              
+              msg = f'✅ Server {repo_name} | Batch #{batch_id} Completed! ({count} numbers)'
+              requests.post(f'https://api.telegram.org/bot{token}/sendMessage', data={'chat_id': chat_id, 'text': msg})
+              print('Completion message sent successfully')
+          except Exception as e:
+              print(f'Failed to send completion message: {e}')
+          "
