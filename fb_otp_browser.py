@@ -627,8 +627,7 @@ chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}
             self.random_sleep(2, 4)  # Reduced wait time for speed (was 8-12)
             
             # Handle Cookie Consent (European/International IPs)
-            # Handle Cookie Consent (Removed by user request)
-            # self._handle_cookie_consent()
+            self._handle_cookie_consent()
             
             # Simulate human browsing behavior
             self.simulate_human_behavior()
@@ -640,8 +639,76 @@ chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}
             self._save_failure_snapshot("step1_open_page")
             return False
 
-    # Cookie consent handler removed by user request
-    # def _handle_cookie_consent(self): ...
+    def _handle_cookie_consent(self):
+        """Handle Facebook Cookie Consent Popup (Mobile)"""
+        try:
+            # Quick check if any dialog is present to avoid waiting
+            try:
+                # Look for common cookie keywords in page source first
+                page_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
+                if "cookie" not in page_text and "cookies" not in page_text:
+                    return
+            except:
+                pass
+
+            log("Checking for Cookie Consent...", "INFO")
+            
+            # Selectors for "Allow", "Allow all cookies", "Accept"
+            cookie_btn_selectors = [
+                # Mobile specific generic buttons
+                (By.XPATH, "//button[contains(text(), 'Allow all cookies')]"),
+                (By.XPATH, "//button[contains(text(), 'Allow cookies')]"),
+                (By.XPATH, "//div[@role='button' and contains(text(), 'Allow all cookies')]"),
+                (By.XPATH, "//span[contains(text(), 'Allow all cookies')]"),
+                
+                # Input type submit (sometimes used)
+                (By.XPATH, "//input[@value='Allow all cookies']"),
+                
+                # specific data-testids
+                (By.CSS_SELECTOR, "[data-testid='cookie-policy-manage-dialog-accept-button']"),
+                (By.CSS_SELECTOR, "[data-testid='cookie-policy-dialog-accept-button']"),
+                
+                # Fallback text search
+                (By.XPATH, "//*[contains(text(), 'Allow all cookies')]"),
+                (By.XPATH, "//*[contains(text(), 'Accept cookies')]"),
+                
+                # Arabic
+                (By.XPATH, "//button[contains(text(), 'السماح بكل ملفات تعريف الارتباط')]"),
+                (By.XPATH, "//button[contains(text(), 'السماح')]"),
+            ]
+
+            for by, selector in cookie_btn_selectors:
+                try:
+                    # Short wait for these
+                    btn = WebDriverWait(self.driver, 2).until(
+                        EC.element_to_be_clickable((by, selector))
+                    )
+                    if btn:
+                        log(f"Found Cookie Button: {selector}", "INFO")
+                        try:
+                            btn.click()
+                        except:
+                            self.driver.execute_script("arguments[0].click();", btn)
+                            
+                        log("Clicked Cookie Consent Button!", "OK")
+                        time.sleep(2) # Wait for dialog to close
+                        return
+                except:
+                    continue
+            
+            # If "Allow" not found, check for "Decline optional cookies" (sometimes only option)
+            # or "Only essential cookies"
+            try:
+                decline_btn = self.driver.find_element(By.XPATH, "//button[contains(text(), 'Decline optional cookies')]")
+                decline_btn.click()
+                log("Clicked 'Decline optional cookies' (Allow not found)", "OK")
+                time.sleep(1)
+            except:
+                pass
+                
+        except Exception as e:
+            # Non-critical, just log
+            log(f"Cookie check error (Non-critical): {e}", "WARN")
     
     def step2_enter_phone(self, phone):
         """Step 2: Enter phone number in search field"""

@@ -15,6 +15,8 @@ const Dashboard = () => {
     const [expandedRow, setExpandedRow] = useState(null);
     const [numberLogs, setNumberLogs] = useState({});
 
+    const [page, setPage] = useState(0);
+
     const fetchStats = async () => {
         try {
             const [pending, processing, completed, failed] = await Promise.all([
@@ -40,11 +42,20 @@ const Dashboard = () => {
             const result = await databases.listDocuments(
                 CONFIG.DATABASE_ID,
                 CONFIG.COLLECTION_NUMBERS,
-                [Query.orderDesc('$createdAt'), Query.limit(50)]
+                [
+                    Query.orderDesc('$createdAt'),
+                    Query.limit(50),
+                    Query.offset(page * 50)
+                ]
             );
             setAllNumbers(result.documents);
         } catch (e) { console.error(e); }
     };
+
+    // Re-fetch when page changes
+    useEffect(() => {
+        fetchAllNumbers();
+    }, [page]);
 
     const fetchLogsForNumber = async (numberId) => {
         if (numberLogs[numberId]) return; // Already fetched
@@ -179,7 +190,7 @@ const Dashboard = () => {
                                                                 <div className="flex items-center gap-2 mb-1">
                                                                     <span className="text-xs text-gray-500">{idx + 1}.</span>
                                                                     <span className={`text-sm ${log.level === 'error' ? 'text-red-400' :
-                                                                            log.level === 'success' ? 'text-green-400' : 'text-gray-300'
+                                                                        log.level === 'success' ? 'text-green-400' : 'text-gray-300'
                                                                         }`}>
                                                                         {log.message}
                                                                     </span>
