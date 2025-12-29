@@ -147,8 +147,27 @@ const Dashboard = () => {
 
             {/* Numbers Table */}
             <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-                <div className="p-4 border-b border-gray-800 bg-gray-900/50">
+                <div className="p-4 border-b border-gray-800 bg-gray-900/50 flex justify-between items-center">
                     <h2 className="text-xl font-semibold">All Numbers</h2>
+                    <div className="flex gap-2">
+                        <button
+                            onClick={() => setPage(p => Math.max(0, p - 1))}
+                            disabled={page === 0}
+                            className={`px-3 py-1 rounded border border-gray-700 text-sm ${page === 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-800'}`}
+                        >
+                            Previous
+                        </button>
+                        <span className="px-3 py-1 text-sm text-gray-500">
+                            Page {page + 1}
+                        </span>
+                        <button
+                            onClick={() => setPage(p => p + 1)}
+                            disabled={allNumbers.length < 50}
+                            className={`px-3 py-1 rounded border border-gray-700 text-sm ${allNumbers.length < 50 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-800'}`}
+                        >
+                            Next
+                        </button>
+                    </div>
                 </div>
                 <div className="overflow-x-auto">
                     <table className="w-full">
