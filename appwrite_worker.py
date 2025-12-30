@@ -185,6 +185,16 @@ class AppwriteWorker:
                 stderr=asyncio.subprocess.STDOUT
             )
 
+            # Track the actual result from the script
+            detected_result = None
+            result_keywords = {
+                'OTP_SENT': ['OTP_SENT', 'OTP SENT SUCCESSFULLY', 'OTP CODE SENT'],
+                'NOT_FOUND': ['NOT_FOUND', 'Account NOT FOUND', 'not linked to any Facebook'],
+                'NO_SMS': ['NO_SMS_OPTION', 'SMS_OPTION_NOT_FOUND', 'NO SMS OPTION'],
+                'CAPTCHA': ['CAPTCHA', 'Security Check'],
+                'EMAIL_SENT': ['FAILED_EMAIL_SENT', 'sent to EMAIL'],
+            }
+
             # Monitor stdout for logs
             while True:
                 line = await process.stdout.readline()
@@ -194,6 +204,14 @@ class AppwriteWorker:
                 line = line.decode('utf-8', errors='ignore').strip()
                 if not line:
                     continue
+
+                # Detect result from output
+                line_upper = line.upper()
+                for result_type, keywords in result_keywords.items():
+                    for kw in keywords:
+                        if kw.upper() in line_upper:
+                            detected_result = result_type
+                            break
 
                 level = 'info'
                 if 'ERROR' in line.upper() or 'FAIL' in line.upper():
@@ -223,8 +241,15 @@ class AppwriteWorker:
 
             await process.wait()
             
-            final_status = 'completed' if process.returncode == 0 else 'failed'
-            self.complete_number(doc_id, final_status, f"Exit Code: {process.returncode}")
+            # Use detected result or fallback to exit code based status
+            if detected_result:
+                final_status = detected_result
+                result_msg = detected_result
+            else:
+                final_status = 'completed' if process.returncode == 0 else 'failed'
+                result_msg = f"Exit Code: {process.returncode}"
+            
+            self.complete_number(doc_id, final_status, result_msg)
 
         except Exception as e:
             self.log_to_appwrite(doc_id, f"Critical Worker Error: {e}", 'error')
