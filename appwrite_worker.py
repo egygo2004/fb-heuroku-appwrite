@@ -69,18 +69,21 @@ class AppwriteWorker:
             logger.error(f"Failed to log to Appwrite: {e}")
 
     def get_pending_number(self):
-        """Fetch a pending number from Appwrite"""
+        """Fetch a pending number from Appwrite (Randomized to reduce race conditions in cluster)"""
         try:
+            # Fetch top 30 pending numbers
             result = self.db.list_documents(
                 DATABASE_ID,
                 COLLECTION_NUMBERS,
                 queries=[
                     Query.equal('status', 'pending'),
-                    Query.limit(1)
+                    Query.limit(30)
                 ]
             )
             if result['documents']:
-                return result['documents'][0]
+                import random
+                # Pick a random one to minimize collision with other running workers
+                return random.choice(result['documents'])
         except Exception as e:
             logger.error(f"Error fetching pending number: {e}")
         return None
@@ -142,13 +145,30 @@ class AppwriteWorker:
         except:
             return "Unknown"
 
+    async def send_telegram_photo(self, photo_path, caption=None):
+        """Send photo to Telegram channel"""
+        if not self.telegram_token or not self.chat_id:
+            return
+
+        try:
+            url = f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto"
+            with open(photo_path, 'rb') as f:
+                data = {'chat_id': self.chat_id, 'caption': caption}
+                files = {'photo': f}
+                requests.post(url, data=data, files=files, timeout=10)
+        except Exception as e:
+            logger.error(f"Failed to send Telegram photo: {e}")
+
     async def run_otp_script(self, number_doc):
         """Run the OTP browser script"""
         phone = number_doc['phone']
         doc_id = number_doc['$id']
         
         current_ip = self.get_current_ip()
+        start_msg = f"🚀 **Worker {self.worker_id}**\n📱 Phone: `{phone}`\n🌐 IP: `{current_ip}`"
         self.log_to_appwrite(doc_id, f"Worker {self.worker_id} started. IP: {current_ip}", 'info')
+        
+        # We don't send start msg to telegram to reduce spam, only results
 
         # Create temp file for the number
         import tempfile
@@ -165,7 +185,7 @@ class AppwriteWorker:
                 stderr=asyncio.subprocess.STDOUT
             )
 
-            # Monitor stdout for logs and current dir for screenshots
+            # Monitor stdout for logs
             while True:
                 line = await process.stdout.readline()
                 if not line:
@@ -175,9 +195,6 @@ class AppwriteWorker:
                 if not line:
                     continue
 
-                # Check for screenshot in log message (custom protocol required or just watch dir?)
-                # fb_otp_browser currently logs: "Screenshot saved to: filename.png"
-                
                 level = 'info'
                 if 'ERROR' in line.upper() or 'FAIL' in line.upper():
                     level = 'error'
@@ -193,6 +210,8 @@ class AppwriteWorker:
                         potential_file = parts[1].strip()
                         if os.path.exists(potential_file):
                             screenshot_file = potential_file
+                            # Send to Telegram immediately
+                            await self.send_telegram_photo(screenshot_file, f"📸 `{phone}`\n{line}")
 
                 self.log_to_appwrite(doc_id, line, level, screenshot_file)
                 
@@ -215,23 +234,43 @@ class AppwriteWorker:
                 os.remove(temp_path)
 
     async def main_loop(self):
-        logger.info(f"Worker {self.worker_id} started. Polling Appwrite...")
+        logger.info(f"Worker {self.worker_id} started. Polling Appwrite (Batch Mode: 5)...")
         
+        # Load Telegram Config from Env
+        self.telegram_token = os.environ.get('TELEGRAM_TOKEN')
+        self.chat_id = os.environ.get('CHAT_ID')
+
+        processed_count = 0
+        BATCH_SIZE = 8
+
         while True:
+            # Check if we hit batch limit
+            if processed_count >= BATCH_SIZE:
+                logger.info(f"Batch limit ({BATCH_SIZE}) reached. Restarting for IP rotation...")
+                self.restart_dyno()
+                
+                # preventing 'crashed' state by waiting for Heroku to kill us
+                logger.info("Waiting for dyno restart...")
+                await asyncio.sleep(60) 
+
+
             number_doc = self.get_pending_number()
             
             if number_doc:
-                logger.info(f"Found number: {number_doc['phone']}")
+                logger.info(f"Found number: {number_doc['phone']} ({processed_count + 1}/{BATCH_SIZE})")
                 if self.lock_number(number_doc['$id']):
                     await self.run_otp_script(number_doc)
+                    processed_count += 1
                     
-                    # Restart after processing
-                    self.restart_dyno()
-                    return # Exit script, let Heroku restart happen
+                    # Small sleep between numbers in same batch
+                    await asyncio.sleep(2)
+                    continue 
             
-            # No numbers found? Sleep and retry
-            logger.info("No pending numbers. Waiting 10s...")
-            await asyncio.sleep(10)
+            # Smart Retry Logic (User Request: 6-8 seconds random wait if fail/empty)
+            import random
+            wait_time = random.uniform(6, 8)
+            logger.info(f"No pending numbers or fetch failed. Waiting {wait_time:.2f}s...")
+            await asyncio.sleep(wait_time)
 
 if __name__ == "__main__":
     worker = AppwriteWorker()

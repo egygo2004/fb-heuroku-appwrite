@@ -189,7 +189,7 @@ class FacebookOTPBrowser:
     def __init__(self, headless=False, proxy=None, proxy_manager=None):
         self.driver = None
         self.headless = headless
-        self.wait_time = 15 # Increased default wait
+        self.wait_time = 5 # Optimized for speed
         self.proxy = proxy
         self.proxy_manager = proxy_manager
         self.snapshot_taken = False
@@ -624,7 +624,7 @@ chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}
         try:
             self._take_step_snapshot("STEP1_START")
             self.driver.get('https://m.facebook.com/login/identify')
-            self.random_sleep(2, 4)  # Reduced wait time for speed (was 8-12)
+            time.sleep(2)  # Fixed 2s wait (optimized)
             
             # Handle Cookie Consent (European/International IPs)
             self._handle_cookie_consent()
@@ -907,52 +907,8 @@ chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}
 
             # FOURTH: Check for "Choose your account" page (multiple accounts)
             if "choose your account" in page_source:
-                log("Detected 'Choose your account' page - clicking first account...", "INFO")
-                try:
-                    # Find all clickable account rows
-                    account_selectors = [
-                        # PRIORITY 1: Only buttons/links that appear AFTER the "Choose your account" header
-                        # This safely excludes top navigation/back buttons
-                        (By.XPATH, "//*[contains(text(), 'Choose your account')]/following::div[@role='button']"),
-                        (By.XPATH, "//*[contains(text(), 'Choose your account')]/following::a[@role='button']"),
-                        (By.XPATH, "//*[contains(text(), 'Choose your account')]/following::div[contains(@class, 'x1i10hfl')]"),
-                        
-                        # PRIORITY 2: List Items (often used for results)
-                        (By.TAG_NAME, "li"),
-                        (By.CSS_SELECTOR, "li div[role='button']"),
-                        
-                        # Fallback (Risky, but better than nothing if above fail)
-                        (By.XPATH, "//div[@role='button'][.//img]"), 
-                    ]
-                    
-                    for by, selector in account_selectors:
-                        try:
-                            elements = self.driver.find_elements(by, selector)
-                            if elements:
-                                log(f"DEBUG: Found {len(elements)} candidates with {selector}", "INFO")
-                                for i, elem in enumerate(elements):
-                                    try:
-                                        txt = elem.text.replace("\n", " | ")
-                                        tag = elem.tag_name
-                                        classes = elem.get_attribute("class")
-                                        log(f"   [{i}] Tag: {tag}, Text: {txt}, Class: {classes}", "INFO")
-                                        # Skip if it looks like a back button (empty text or just arrow)
-                                        if not txt.strip() and "role" in classes: 
-                                             log(f"   [{i}] Skipping empty text button (likely back/nav)", "INFO")
-                                        # Force click the first valid one
-                                        elem.click()
-                                        log(f"Clicked candidate #{i}", "OK")
-                                        self._take_step_snapshot("MULTI_ACC_SELECTED", "")
-                                        time.sleep(2)
-                                        return "FOUND"
-                                    except Exception as inner_e:
-                                        log(f"   [{i}] failed to inspect/click: {inner_e}", "WARN")
-                        
-                        except Exception as e:
-                            log(f"Selector {selector} failed: {e}", "WARN")
-                            continue
-                except Exception as e:
-                    log(f"Error clicking account: {e}", "WARN")
+                log("Detected 'Choose your account' page - returning MULTIPLE_ACCOUNTS status.", "INFO")
+                return "MULTIPLE_ACCOUNTS"
             
             # Fallback: Check for multiple accounts using old method
             if self._check_multiple_accounts() > 0:
@@ -1477,43 +1433,89 @@ chrome.webRequest.onAuthRequired.addListener(callbackFn, {{urls: ["<all_urls>"]}
                         break
 
                 if status == "MULTIPLE_ACCOUNTS":
-                    log("Multiple accounts detected!", "INFO")
-                    # Find all "This is me" buttons
+                    log("Multiple accounts detected! (Delegated from Step 4)", "INFO")
+                    
+                    # Robust generic selectors for account list (same as Step 4 used to have)
+                    # We need to re-find them here because the page (DOM) is fresh
                     try:
-                        buttons = self.driver.find_elements(By.CSS_SELECTOR, "a[role='button']")
-                        # Filter for "This is me" buttons if possible, or just take non-cancel ones
-                        # The text usually "This is my account"
+                        potential_buttons = []
+                        
+                        # Strategy: Find the container "Choose your account" and get all clickable items after it
+                        # Try multiple strategies to gather ALL candidates
+                        strategies = [
+                            (By.XPATH, "//*[contains(text(), 'Choose your account')]/following::div[@role='button']"),
+                            (By.XPATH, "//*[contains(text(), 'Choose your account')]/following::a[@role='button']"),
+                            (By.CSS_SELECTOR, "li div[role='button']"),
+                            (By.CSS_SELECTOR, ".uiList li a"),
+                            # Fallback: Just any button that looks like a user row
+                            (By.XPATH, "//div[@role='button'][.//img]"),
+                        ]
+                        
+                        found_candidates = []
+                        for by, selector in strategies:
+                            try:
+                                elems = self.driver.find_elements(by, selector)
+                                for e in elems:
+                                    if e.is_displayed() and e.text.strip():
+                                         found_candidates.append(e)
+                            except: pass
+                            
+                        # Deduplicate by reference ID or text? 
+                        # Selenium elements are objects, let's just use list but filter unique
                         valid_buttons = []
-                        for b in buttons:
-                             if "account" in b.text.lower() or "هذا إيميل" in b.text or "حسابي" in b.text:
-                                 valid_buttons.append(b)
+                        seen_texts = set()
+                        
+                        for btn in found_candidates:
+                             # Simple filter: Must have some text (name)
+                             txt = btn.text.strip()
+                             # Skip "Not you?" or "Cancel" buttons if they appear in the list
+                             if "not you" in txt.lower() or "cancel" in txt.lower():
+                                 continue
+                                 
+                             # Avoid duplicates
+                             if txt not in seen_texts:
+                                 valid_buttons.append(btn)
+                                 seen_texts.add(txt)
                         
                         num_accounts = len(valid_buttons)
-                        log(f"Found {num_accounts} valid account buttons.", "INFO")
+                        log(f"Found {num_accounts} unique account options.", "INFO")
                         
+                        if num_accounts == 0:
+                            log("Detected multiple accounts page but found no clickable buttons.", "ERROR")
+                            break
+                            
                         if accounts_processed >= num_accounts:
-                            log("All accounts processed.", "OK")
+                            log(f"All {num_accounts} accounts processed. No SMS option found in any.", "WARN")
                             break
                             
                         # Click the button for the current index
                         try:
+                            # Use index from outer loop
                             target_btn = valid_buttons[accounts_processed]
-                            log(f"Selecting account #{accounts_processed + 1}...", "INFO")
+                            log(f"--- Selecting Account #{accounts_processed + 1} / {num_accounts}: '{target_btn.text.splitlines()[0]}' ---", "INFO")
+                            
+                            # Scroll and Click
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_btn)
+                            time.sleep(0.5)
                             target_btn.click()
-                            time.sleep(5)
-                            # Now we continue to Step 5...
+                            
+                            self._take_step_snapshot(f"MultiAcc_Click_{accounts_processed+1}", phone)
+                            time.sleep(3)
+                            # Continues to Step 5...
+                            
                         except Exception as e:
-                            log(f"Error identifying account button: {e}", "ERROR")
+                            log(f"Error identifying/clicking account button #{accounts_processed}: {e}", "ERROR")
                             break
                             
                     except Exception as e:
                         log(f"Error handling multiple accounts: {e}", "ERROR")
                         break
+                        
                 elif status == "FOUND":
                     if accounts_processed > 0:
-                        # We are looping but status is just FOUND?
-                        # This implies we might have lost the multi-account state or it was a single account
-                         break # Stop looping if we only found one
+                        # We are looping but Step 4 returned "FOUND" instead of "MULTIPLE"?
+                        # This means Step 4 didn't see the list this time, or we auto-redirected.
+                        pass
                 else:
                     break
 

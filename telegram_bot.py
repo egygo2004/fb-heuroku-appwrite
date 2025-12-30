@@ -4,6 +4,7 @@ Runs fb_otp_browser.py directly on Heroku (no GitHub Actions)
 With dyno restart after each number for IP rotation
 """
 
+# Force Rebuild for Procfile Detection
 import os
 import asyncio
 import logging
